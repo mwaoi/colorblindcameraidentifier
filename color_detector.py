@@ -1,8 +1,10 @@
 import cv2
 import numpy as np
+import threading
 import voice_output
 from color_namer import get_color_name
 from voice_output import speak
+from vision_identifier import identify_color
 
 VOTE_REGION_SIZE = 160   # px, square region around crosshair
 VOTE_GRID = 9            # 9x9 = 81 sample points
@@ -27,7 +29,7 @@ class ColorDetector:
         self._cap.set(cv2.CAP_PROP_AUTO_WB, 0)  # disable hardware AWB if supported
 
     def run(self) -> None:
-        current_color = ""
+        state = {"color": "", "identifying": False, "pending": None}
         frame_count = 0
         try:
             cv2.namedWindow(WINDOW_TITLE)
@@ -43,17 +45,40 @@ class ColorDetector:
                 h, w = frame.shape[:2]
                 cx, cy = w // 2, h // 2
 
+                # Pick up completed vision result from background thread
+                if state["pending"] is not None:
+                    state["color"] = state["pending"]
+                    state["pending"] = None
+                    state["identifying"] = False
+
                 self._draw_reticle(frame, cx, cy)
 
-                if current_color:
-                    self._draw_text_overlay(frame, current_color)
+                # Capture here: reticle is drawn (gives Claude context),
+                # but no text overlay yet (prevents "identifying..." from confusing the model)
+                api_frame = frame.copy()
+
+                display = "identifying..." if state["identifying"] else state["color"]
+                if display:
+                    self._draw_text_overlay(frame, display)
 
                 cv2.imshow(WINDOW_TITLE, frame)
 
                 key = cv2.waitKey(1) & 0xFF
-                if key == ord(" ") and frame_count > WARMUP_FRAMES:
-                    current_color = self._vote_region(frame, cx, cy)
-                    speak(current_color)
+                if key == ord(" ") and frame_count > WARMUP_FRAMES and not state["identifying"]:
+                    state["identifying"] = True
+                    state["color"] = ""
+                    frame_copy = api_frame
+                    cx_c, cy_c = cx, cy
+
+                    def _identify(f=frame_copy, cx=cx_c, cy=cy_c):
+                        color = identify_color(f)           # Claude Vision API
+                        if not color:
+                            color = self._vote_region(f, cx, cy)  # HSV fallback
+                        speak(color)
+                        state["pending"] = color
+
+                    threading.Thread(target=_identify, daemon=True).start()
+
                 elif key in (ord("q"), ord("Q")):
                     break
         finally:
