@@ -27,7 +27,7 @@ from dataclasses import dataclass
 import oklab_namer
 import skin_detector
 import voice_output
-from color_memory import ColorMemory
+from color_memory import ColorMemory, REJECTED
 from color_namer import get_color_name
 from object_detector import ObjectDetector
 from vision_identifier import identify_color
@@ -38,7 +38,7 @@ _log = logging.getLogger("color_detector")
 
 VOTE_REGION_SIZE = 160
 RETICLE_COLOR = (0, 255, 0)
-WINDOW_TITLE = "Color Identifier  |  SPACE = identify  |  Y = confirm  |  Q = quit"
+WINDOW_TITLE = "Color Identifier  |  SPACE = identify  |  Y = correct  |  N = wrong  |  Q = quit"
 TEXT_COLOR = (255, 255, 255)
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 FONT_SCALE = 0.9
@@ -139,6 +139,12 @@ class ColorDetector:
                     _log.info("User confirmed: '%s' (memory samples: %d)",
                               state.color, self._memory.sample_count())
 
+                elif key in (ord("n"), ord("N")) and state.color and state.last_oklab is not None:
+                    self._memory.reject(state.last_oklab, state.color)
+                    _log.info("User rejected: '%s' (memory samples: %d)",
+                              state.color, self._memory.sample_count())
+                    state.color = "?"  # clear the wrong answer visually
+
                 elif key in (ord("q"), ord("Q")):
                     break
         finally:
@@ -209,24 +215,31 @@ class ColorDetector:
                     routing = "clothing"
                     _log.debug("Person detected, no skin in ROI — rerouting to clothing")
 
+                # Compute ROI mean and Oklab coords (needed for memory check on all routes)
+                mean_bgr = _highlight_robust_mean(roi)
+                b_val, g_val, r_val = int(mean_bgr[0]), int(mean_bgr[1]), int(mean_bgr[2])
+                try:
+                    oklab = oklab_namer.rgb_to_oklab(r_val, g_val, b_val)
+                except Exception:
+                    oklab = None
+
+                # Check memory: a prior rejection overrides skin routing
+                if oklab is not None and routing == "skin":
+                    mem = self._memory.predict(oklab)
+                    if mem == REJECTED:
+                        routing = "general"
+                        _log.debug("Memory rejection — overriding skin route to general")
+
                 if routing == "skin":
                     color = skin_detector.get_skin_tone_name(roi)
-                    # No memory lookup for skin tones — ITA is already precise
-                    self._result_queue.put((color, "local", press_id, None))
+                    self._result_queue.put((color, "local", press_id, oklab))
                 else:
-                    mean_bgr = _highlight_robust_mean(roi)
-                    b_val, g_val, r_val = int(mean_bgr[0]), int(mean_bgr[1]), int(mean_bgr[2])
-                    try:
-                        oklab = oklab_namer.rgb_to_oklab(r_val, g_val, b_val)
-                    except Exception:
-                        oklab = None
-
-                    # Check memory first — skip full pipeline if we have a trusted sample
+                    # Check memory for a trusted positive hit
                     if oklab is not None:
-                        memory_color = self._memory.predict(oklab)
-                        if memory_color:
-                            _log.info("Memory hit: '%s'", memory_color)
-                            self._result_queue.put((memory_color, "local", press_id, oklab))
+                        mem = self._memory.predict(oklab)
+                        if mem and mem != REJECTED:
+                            _log.info("Memory hit: '%s'", mem)
+                            self._result_queue.put((mem, "local", press_id, oklab))
                             return
 
                     try:

@@ -22,6 +22,9 @@ from scipy.spatial import cKDTree
 
 _log = logging.getLogger("color_memory")
 
+# Sentinel returned by predict() when the region was explicitly rejected by the user
+REJECTED = "__REJECTED__"
+
 _DB_PATH = Path.home() / ".colorblindcam" / "memory.json"
 
 # Oklab distance below which two colors are considered "the same region"
@@ -46,16 +49,21 @@ class ColorMemory:
 
     def predict(self, oklab: np.ndarray) -> str | None:
         """
-        Return a stored color name if a sufficiently close, trusted sample
-        exists. Returns None if no match or confidence too low.
+        Return a stored color name if a sufficiently close, trusted sample exists.
+        Returns REJECTED if the user previously said this region was wrong.
+        Returns None if no match or confidence too low.
         """
         if self._tree is None or not self._samples:
             return None
         dist, idx = self._tree.query(oklab)
         sample = self._samples[idx]
-        if dist <= _MATCH_RADIUS and sample["count"] >= _MIN_COUNT:
-            _log.debug("Memory hit (dist=%.4f, count=%d): %s", dist, sample["count"], sample["color"])
-            return sample["color"]
+        if dist <= _MATCH_RADIUS:
+            if sample["count"] < 0:
+                _log.debug("Memory rejection hit (dist=%.4f): %s", dist, sample["color"])
+                return REJECTED
+            if sample["count"] >= _MIN_COUNT:
+                _log.debug("Memory hit (dist=%.4f, count=%d): %s", dist, sample["count"], sample["color"])
+                return sample["color"]
         return None
 
     def add_correction(self, oklab: np.ndarray, color: str) -> None:
@@ -74,6 +82,33 @@ class ColorMemory:
         self._upsert(oklab, color, source="confirm")
         self._maybe_save()
 
+    def reject(self, oklab: np.ndarray, color: str) -> None:
+        """
+        Mark this color region as wrong (user pressed N).
+        Stores a rejection entry with a negative count so predict() returns REJECTED.
+        A rejection can be overridden later by confirm() if the model gets it right.
+        """
+        close_radius = _MATCH_RADIUS * 0.5
+
+        if self._tree is not None and self._samples:
+            dist, idx = self._tree.query(oklab)
+            if dist <= close_radius:
+                existing = self._samples[idx]
+                existing["color"] = color
+                existing["count"] = -(_MIN_COUNT + 1)  # clearly below zero
+                _log.info("Rejected '%s' (dist=%.4f)", color, dist)
+                self._rebuild_tree()
+                self._dirty = True
+                self._maybe_save()
+                return
+
+        # No nearby sample — add a new rejection entry
+        self._samples.append({"oklab": list(float(x) for x in oklab), "color": color, "count": -(_MIN_COUNT + 1)})
+        _log.info("New rejection entry: '%s' (total=%d)", color, len(self._samples))
+        self._rebuild_tree()
+        self._dirty = True
+        self._maybe_save()
+
     def sample_count(self) -> int:
         return len(self._samples)
 
@@ -88,6 +123,17 @@ class ColorMemory:
             dist, idx = self._tree.query(oklab)
             if dist <= close_radius:
                 existing = self._samples[idx]
+                if existing["count"] < 0:
+                    # This region was rejected — only a user confirm can clear it
+                    if source == "confirm":
+                        _log.info("[confirm] Clearing rejection for '%s', now '%s'", existing["color"], color)
+                        existing["color"] = color
+                        existing["count"] = 1
+                    else:
+                        _log.debug("[%s] Skipping upsert — region is rejected", source)
+                    self._rebuild_tree()
+                    self._dirty = True
+                    return
                 if existing["color"] == color:
                     existing["count"] += 1
                     _log.debug("[%s] Reinforced '%s' (count=%d)", source, color, existing["count"])
