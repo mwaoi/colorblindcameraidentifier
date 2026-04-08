@@ -12,13 +12,11 @@ export default function Demo() {
 
   const [cameraState, setCameraState] = useState<CameraState>('idle')
   const [result, setResult] = useState<ColorResult | null>(null)
-  const [pulse, setPulse] = useState(false) // flash the reticle on identify
+  const [pulse, setPulse] = useState(false)
 
-  // Stop stream when component unmounts
+  // Stop stream on unmount
   useEffect(() => {
-    return () => {
-      streamRef.current?.getTracks().forEach(t => t.stop())
-    }
+    return () => { streamRef.current?.getTracks().forEach(t => t.stop()) }
   }, [])
 
   const startCamera = async () => {
@@ -32,15 +30,13 @@ export default function Demo() {
         video: { width: { ideal: 640 }, height: { ideal: 480 } },
       })
       streamRef.current = stream
-      const video = videoRef.current
-      if (video) {
-        video.srcObject = stream
-        // Wait for metadata (videoWidth/videoHeight available) before playing
-        await new Promise<void>((resolve) => {
-          video.onloadedmetadata = () => resolve()
-        })
-        await video.play()
-      }
+
+      // videoRef is always mounted (video is hidden, not conditionally rendered)
+      // so this is always non-null
+      const video = videoRef.current!
+      video.srcObject = stream
+      await new Promise<void>(resolve => { video.onloadedmetadata = () => resolve() })
+      await video.play()
       setCameraState('active')
     } catch {
       setCameraState('denied')
@@ -50,17 +46,16 @@ export default function Demo() {
   const identify = useCallback(() => {
     const video = videoRef.current
     const canvas = canvasRef.current
-    // Guard: video must have loaded dimensions
+    // Guard: dimensions must be loaded
     if (!video || !canvas || cameraState !== 'active' || !video.videoWidth) return
 
-    // Draw current frame to hidden canvas — no mirroring needed for color sampling,
-    // CSS scaleX(-1) is display-only and doesn't affect center pixel values
     canvas.width = video.videoWidth
     canvas.height = video.videoHeight
     const ctx = canvas.getContext('2d')!
+    // No mirror transform needed — CSS scaleX(-1) is display-only,
+    // center pixel values are orientation-independent
     ctx.drawImage(video, 0, 0)
 
-    // Sample the 160×160 center region
     const cx = Math.floor(canvas.width / 2)
     const cy = Math.floor(canvas.height / 2)
     const half = RETICLE_SIZE / 2
@@ -79,14 +74,14 @@ export default function Demo() {
     setPulse(true)
     setTimeout(() => setPulse(false), 180)
 
-    // Speak via Web Speech API
+    // Web Speech API output
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel()
       window.speechSynthesis.speak(new SpeechSynthesisUtterance(found.name))
     }
   }, [cameraState])
 
-  // Space key → identify (only when camera is active and focus isn't on an input)
+  // Space key → identify
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.code === 'Space' && cameraState === 'active' && !(e.target instanceof HTMLInputElement)) {
@@ -98,51 +93,15 @@ export default function Demo() {
     return () => window.removeEventListener('keydown', onKey)
   }, [cameraState, identify])
 
-  // ── idle / error states ──────────────────────────────────────────────────
-
-  if (cameraState === 'idle') {
-    return (
-      <div className="flex flex-col items-start gap-5">
-        <p className="text-zinc-400 text-sm max-w-sm">
-          runs the same Oklab k-NN pipeline as the desktop app — 949 XKCD colors,
-          specular highlight rejection, Web Speech API output. no backend.
-        </p>
-        <button
-          onClick={startCamera}
-          className="border border-zinc-700 px-5 py-2.5 text-sm text-zinc-300 hover:border-green-600 hover:text-white transition-colors duration-150 font-mono"
-        >
-          start camera
-        </button>
-      </div>
-    )
-  }
-
-  if (cameraState === 'requesting') {
-    return (
-      <div className="text-zinc-600 text-sm font-mono animate-pulse">
-        requesting camera access...
-      </div>
-    )
-  }
-
-  if (cameraState === 'denied') {
-    return (
-      <p className="text-zinc-500 text-sm font-mono">getUserMedia: permission denied</p>
-    )
-  }
-
-  if (cameraState === 'unavailable') {
-    return (
-      <p className="text-zinc-500 text-sm font-mono">getUserMedia unavailable</p>
-    )
-  }
-
-  // ── active camera ────────────────────────────────────────────────────────
-
   return (
     <div className="flex flex-col gap-5 max-w-xl">
-      {/* Camera feed with reticle — fixed aspect ratio prevents zero-height collapse */}
-      <div className="relative bg-zinc-900 overflow-hidden border border-zinc-800" style={{ aspectRatio: '4/3' }}>
+
+      {/* Camera feed — always in the DOM so videoRef is valid when startCamera runs.
+          Hidden via CSS until active, not conditionally rendered. */}
+      <div
+        className={`relative bg-zinc-900 overflow-hidden border border-zinc-800 ${cameraState !== 'active' ? 'hidden' : ''}`}
+        style={{ aspectRatio: '4/3' }}
+      >
         <video
           ref={videoRef}
           className="absolute inset-0 w-full h-full object-cover"
@@ -151,7 +110,7 @@ export default function Demo() {
           playsInline
           muted
         />
-        {/* Green reticle — matches cv2.rectangle in color_detector.py */}
+        {/* Green reticle — (0,255,0) matching cv2.rectangle in color_detector.py */}
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div
             className="transition-all duration-75"
@@ -168,35 +127,66 @@ export default function Demo() {
       {/* Hidden canvas for pixel sampling */}
       <canvas ref={canvasRef} className="hidden" />
 
-      {/* Controls row */}
-      <div className="flex items-center gap-4 flex-wrap">
-        <button
-          onClick={identify}
-          className="border border-zinc-700 px-5 py-2 text-sm font-mono text-zinc-300 hover:border-green-600 hover:text-white transition-colors duration-150 active:scale-95"
-        >
-          identify
-        </button>
-      </div>
-
-      {/* Result */}
-      {result && (
-        <div className="flex items-center gap-4">
-          <div
-            className="w-12 h-12 border border-white/10 shrink-0"
-            style={{ backgroundColor: result.hex }}
-          />
-          <div>
-            <p className="text-white text-xl font-medium lowercase tracking-tight">
-              {result.name}
-            </p>
-            <p className="text-zinc-600 text-xs font-mono">{result.hex}</p>
-          </div>
+      {/* State-dependent UI */}
+      {cameraState === 'idle' && (
+        <div className="flex flex-col items-start gap-5">
+          <p className="text-zinc-400 text-sm max-w-sm">
+            runs the same Oklab k-NN pipeline as the desktop app — 949 XKCD colors,
+            specular highlight rejection, Web Speech API output. no backend.
+          </p>
+          <button
+            onClick={startCamera}
+            className="border border-zinc-700 px-5 py-2.5 text-sm text-zinc-300 hover:border-green-600 hover:text-white transition-colors duration-150 font-mono"
+          >
+            start camera
+          </button>
         </div>
       )}
 
-      <p className="text-zinc-700 text-xs">
-        voice readout via Web Speech API · color matched to XKCD dataset (949 colors) in Oklab space
-      </p>
+      {cameraState === 'requesting' && (
+        <p className="text-zinc-600 text-sm font-mono animate-pulse">requesting camera access...</p>
+      )}
+
+      {cameraState === 'denied' && (
+        <p className="text-zinc-500 text-sm font-mono">getUserMedia: permission denied</p>
+      )}
+
+      {cameraState === 'unavailable' && (
+        <p className="text-zinc-500 text-sm font-mono">getUserMedia unavailable</p>
+      )}
+
+      {/* Controls and result — only shown when active */}
+      {cameraState === 'active' && (
+        <>
+          <div className="flex items-center gap-4">
+            <button
+              onClick={identify}
+              className="border border-zinc-700 px-5 py-2 text-sm font-mono text-zinc-300 hover:border-green-600 hover:text-white transition-colors duration-150 active:scale-95"
+            >
+              identify
+            </button>
+          </div>
+
+          {result && (
+            <div className="flex items-center gap-4">
+              <div
+                className="w-12 h-12 border border-white/10 shrink-0"
+                style={{ backgroundColor: result.hex }}
+              />
+              <div>
+                <p className="text-white text-xl font-medium lowercase tracking-tight">
+                  {result.name}
+                </p>
+                <p className="text-zinc-600 text-xs font-mono">{result.hex}</p>
+              </div>
+            </div>
+          )}
+
+          <p className="text-zinc-700 text-xs">
+            voice readout via Web Speech API · color matched to XKCD dataset (949 colors) in Oklab space
+          </p>
+        </>
+      )}
     </div>
   )
 }
