@@ -1,13 +1,41 @@
+"""
+Main color detection loop.
+
+Identification pipeline on SPACE press:
+  Thread A (local, ~100-200ms):
+    1. YOLOv8n detects object class in center region
+    2. Routes to skin detector (ITA) or Oklab k-NN based on object type
+    3. Falls back to legacy HSV if Oklab fails
+    4. Posts result to thread-safe queue
+
+  Thread B (Claude Vision, ~1-2s, optional):
+    1. Uses YOLO context to enrich the Claude prompt
+    2. Posts result if API is available
+    3. Only overrides local result if color differs
+
+Results are collected each frame from a queue.Queue — no data races.
+Stale results from previous SPACE presses are discarded via press_id.
+"""
+
 import cv2
+import logging
 import numpy as np
+import queue
 import threading
+from dataclasses import dataclass
+
+import oklab_namer
+import skin_detector
 import voice_output
 from color_namer import get_color_name
-from voice_output import speak
+from object_detector import ObjectDetector
 from vision_identifier import identify_color
+from voice_output import speak
 
-VOTE_REGION_SIZE = 160   # px, square region around crosshair
-VOTE_GRID = 9            # 9x9 = 81 sample points
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+_log = logging.getLogger("color_detector")
+
+VOTE_REGION_SIZE = 160
 RETICLE_COLOR = (0, 255, 0)
 WINDOW_TITLE = "Color Identifier  |  SPACE = identify  |  Q = quit"
 TEXT_COLOR = (255, 255, 255)
@@ -15,6 +43,13 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 FONT_SCALE = 0.9
 FONT_THICKNESS = 2
 WARMUP_FRAMES = 10
+
+
+@dataclass
+class AppState:
+    color: str = ""
+    identifying: bool = False
+    space_press_id: int = 0
 
 
 class ColorDetector:
@@ -26,58 +61,46 @@ class ColorDetector:
             )
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self._cap.set(cv2.CAP_PROP_AUTO_WB, 0)  # disable hardware AWB if supported
+        self._cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+        self._result_queue: queue.Queue[tuple[str, str, int]] = queue.Queue()
+        self._object_detector = ObjectDetector()
 
     def run(self) -> None:
-        state = {"color": "", "identifying": False, "pending": None}
+        state = AppState()
         frame_count = 0
         try:
             cv2.namedWindow(WINDOW_TITLE)
             cv2.createTrackbar("Volume", WINDOW_TITLE, 100, 100,
                                lambda v: voice_output.set_volume(v / 100.0))
+            cv2.createTrackbar("Rate", WINDOW_TITLE, 150, 300,
+                               lambda v: voice_output.set_rate(v))
             while True:
                 ret, frame = self._cap.read()
                 if not ret:
                     break
                 frame = cv2.flip(frame, 1)
-
                 frame_count += 1
                 h, w = frame.shape[:2]
                 cx, cy = w // 2, h // 2
 
-                # Pick up completed vision result from background thread
-                if state["pending"] is not None:
-                    state["color"] = state["pending"]
-                    state["pending"] = None
-                    state["identifying"] = False
-
+                self._collect_pending(state)
                 self._draw_reticle(frame, cx, cy)
 
-                # Capture here: reticle is drawn (gives Claude context),
-                # but no text overlay yet (prevents "identifying..." from confusing the model)
+                # Capture frame here: reticle drawn, no text overlay yet
                 api_frame = frame.copy()
 
-                display = "identifying..." if state["identifying"] else state["color"]
+                display = "identifying..." if state.identifying else state.color
                 if display:
                     self._draw_text_overlay(frame, display)
 
                 cv2.imshow(WINDOW_TITLE, frame)
-
                 key = cv2.waitKey(1) & 0xFF
-                if key == ord(" ") and frame_count > WARMUP_FRAMES and not state["identifying"]:
-                    state["identifying"] = True
-                    state["color"] = ""
-                    frame_copy = api_frame
-                    cx_c, cy_c = cx, cy
 
-                    def _identify(f=frame_copy, cx=cx_c, cy=cy_c):
-                        color = identify_color(f)           # Claude Vision API
-                        if not color:
-                            color = self._vote_region(f, cx, cy)  # HSV fallback
-                        speak(color)
-                        state["pending"] = color
-
-                    threading.Thread(target=_identify, daemon=True).start()
+                if key == ord(" ") and frame_count > WARMUP_FRAMES and not state.identifying:
+                    state.identifying = True
+                    state.color = ""
+                    state.space_press_id += 1
+                    self._start_pipeline(state, api_frame, cx, cy, state.space_press_id)
 
                 elif key in (ord("q"), ord("Q")):
                     break
@@ -85,28 +108,90 @@ class ColorDetector:
             self._cap.release()
             cv2.destroyAllWindows()
 
-    def _vote_region(self, frame: np.ndarray, cx: int, cy: int) -> str:
-        """Sample a 5x5 grid across a 100x100 region and return the plurality color name."""
-        half = VOTE_REGION_SIZE // 2
-        step = VOTE_REGION_SIZE // (VOTE_GRID - 1)
-        votes: dict[str, int] = {}
-        for row in range(VOTE_GRID):
-            for col in range(VOTE_GRID):
-                x = cx - half + col * step
-                y = cy - half + row * step
-                x = max(1, min(frame.shape[1] - 2, x))
-                y = max(1, min(frame.shape[0] - 2, y))
-                # 3x3 patch average per point reduces single-pixel noise
-                patch = frame[y - 1:y + 2, x - 1:x + 2].astype(np.float32)
-                px_bgr = patch.mean(axis=(0, 1))
-                b, g, r = px_bgr
-                name = get_color_name(int(r), int(g), int(b))
-                votes[name] = votes.get(name, 0) + 1
-        return max(votes, key=votes.get)
+    def _collect_pending(self, state: AppState) -> None:
+        """Drain result queue each frame. Thread-safe — queue.Queue is thread-safe by design."""
+        while not self._result_queue.empty():
+            try:
+                color, source, press_id = self._result_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if press_id != state.space_press_id:
+                _log.debug("Discarding stale %s result '%s'", source, color)
+                continue
+
+            if source == "local":
+                state.color = color
+                state.identifying = False
+                speak(color)
+                _log.info("Local result: %s", color)
+
+            elif source == "claude":
+                # Claude arrived after local — only update if result meaningfully differs
+                if color and color != state.color:
+                    _log.info("Claude override: '%s' → '%s'", state.color, color)
+                    state.color = color
+                    speak(color)
+
+    def _start_pipeline(
+        self,
+        state: AppState,
+        frame: np.ndarray,
+        cx: int,
+        cy: int,
+        press_id: int,
+    ) -> None:
+        def local_pipeline() -> None:
+            try:
+                yolo_class = self._object_detector.detect(frame, cx, cy, VOTE_REGION_SIZE)
+                routing = self._object_detector.get_routing(yolo_class)
+                _log.info("YOLO: class=%s routing=%s", yolo_class, routing)
+
+                # Extract center ROI
+                half = VOTE_REGION_SIZE // 2
+                fh, fw = frame.shape[:2]
+                y1, y2 = max(0, cy - half), min(fh, cy + half)
+                x1, x2 = max(0, cx - half), min(fw, cx + half)
+                roi = frame[y1:y2, x1:x2]
+
+                # Person detected but no actual skin → it's clothing
+                if routing == "skin" and not skin_detector.is_skin_region(roi):
+                    routing = "clothing"
+                    _log.debug("Person detected, no skin in ROI — rerouting to clothing")
+
+                if routing == "skin":
+                    color = skin_detector.get_skin_tone_name(roi)
+                else:
+                    mean_bgr = roi.mean(axis=(0, 1)) if roi.size > 0 else np.array([128., 128., 128.])
+                    b_val, g_val, r_val = int(mean_bgr[0]), int(mean_bgr[1]), int(mean_bgr[2])
+                    try:
+                        color = oklab_namer.get_oklab_color_name(r_val, g_val, b_val)
+                    except Exception as e:
+                        _log.warning("Oklab failed (%s), using HSV fallback", e)
+                        color = get_color_name(r_val, g_val, b_val)
+
+                self._result_queue.put((color, "local", press_id))
+
+            except Exception as e:
+                _log.error("Local pipeline error: %s", e, exc_info=True)
+                state.identifying = False
+
+        def claude_pipeline() -> None:
+            try:
+                yolo_class = self._object_detector.detect(frame, cx, cy, VOTE_REGION_SIZE)
+                color = identify_color(frame, object_context=yolo_class)
+                if color:
+                    self._result_queue.put((color, "claude", press_id))
+            except Exception as e:
+                _log.warning("Claude pipeline error: %s", e)
+
+        threading.Thread(target=local_pipeline, daemon=True).start()
+        threading.Thread(target=claude_pipeline, daemon=True).start()
 
     def _draw_reticle(self, frame: np.ndarray, cx: int, cy: int) -> None:
         half = VOTE_REGION_SIZE // 2
-        cv2.rectangle(frame, (cx - half, cy - half), (cx + half, cy + half), RETICLE_COLOR, 1, cv2.LINE_AA)
+        cv2.rectangle(frame, (cx - half, cy - half), (cx + half, cy + half),
+                      RETICLE_COLOR, 1, cv2.LINE_AA)
 
     def _draw_text_overlay(self, frame: np.ndarray, text: str) -> None:
         (text_w, text_h), baseline = cv2.getTextSize(text, FONT, FONT_SCALE, FONT_THICKNESS)
@@ -122,12 +207,7 @@ class ColorDetector:
         cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
 
         cv2.putText(
-            frame,
-            text,
+            frame, text,
             (x1 + padding, y2 - padding - baseline),
-            FONT,
-            FONT_SCALE,
-            TEXT_COLOR,
-            FONT_THICKNESS,
-            cv2.LINE_AA,
+            FONT, FONT_SCALE, TEXT_COLOR, FONT_THICKNESS, cv2.LINE_AA,
         )

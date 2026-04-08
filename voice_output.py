@@ -6,11 +6,17 @@ import threading
 
 _speech_thread: threading.Thread | None = None
 _volume: float = 1.0
+_rate: int = 150
 
 
 def set_volume(v: float) -> None:
     global _volume
     _volume = max(0.0, min(1.0, v))
+
+
+def set_rate(r: int) -> None:
+    global _rate
+    _rate = max(50, min(300, r))
 
 
 def speak(text: str) -> None:
@@ -26,7 +32,7 @@ def _run_speech(text: str) -> None:
     try:
         import pyttsx3
         engine = pyttsx3.init()
-        engine.setProperty("rate", 150)
+        engine.setProperty("rate", _rate)
         engine.setProperty("volume", _volume)
         engine.say(text)
         engine.runAndWait()
