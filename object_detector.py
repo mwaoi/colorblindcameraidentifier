@@ -60,10 +60,11 @@ class ObjectDetector:
         cx: int,
         cy: int,
         region_size: int = 160,
-    ) -> str | None:
+    ) -> tuple[str, float] | None:
         """
-        Run YOLOv8n on the frame. Return the highest-confidence COCO class name
-        whose bounding box overlaps the center region, or None.
+        Run YOLOv8n on the frame. Return (class_name, confidence) for the
+        highest-confidence COCO class whose bounding box overlaps the center
+        region with >= 40% of the ROI covered, or None.
 
         Detections below 40% confidence are ignored.
         """
@@ -72,6 +73,7 @@ class ObjectDetector:
         half = region_size // 2
         roi_x1, roi_y1 = cx - half, cy - half
         roi_x2, roi_y2 = cx + half, cy + half
+        roi_area = region_size * region_size
 
         results = self._model(frame, verbose=False)
         if not results or results[0].boxes is None:
@@ -91,19 +93,21 @@ class ObjectDetector:
             xyxy = boxes.xyxy[i].cpu().numpy()
             bx1, by1, bx2, by2 = int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])
 
-            # Check if this bbox overlaps the center ROI
+            # Compute intersection with center ROI
             inter_x1 = max(bx1, roi_x1)
             inter_y1 = max(by1, roi_y1)
             inter_x2 = min(bx2, roi_x2)
             inter_y2 = min(by2, roi_y2)
 
             if inter_x2 > inter_x1 and inter_y2 > inter_y1:
-                cls_name = names[int(boxes.cls[i])]
-                if conf > best_conf:
+                inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+                overlap_fraction = inter_area / roi_area
+                # Require at least 40% of the ROI to be covered
+                if overlap_fraction >= 0.40 and conf > best_conf:
                     best_conf = conf
-                    best_class = cls_name
+                    best_class = names[int(boxes.cls[i])]
 
-        return best_class
+        return (best_class, best_conf) if best_class is not None else None
 
     def get_routing(self, yolo_class: str | None) -> str:
         """Map a YOLO class name to a color analysis routing category."""

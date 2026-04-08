@@ -27,6 +27,7 @@ from dataclasses import dataclass
 import oklab_namer
 import skin_detector
 import voice_output
+from color_memory import ColorMemory
 from color_namer import get_color_name
 from object_detector import ObjectDetector
 from vision_identifier import identify_color
@@ -37,7 +38,7 @@ _log = logging.getLogger("color_detector")
 
 VOTE_REGION_SIZE = 160
 RETICLE_COLOR = (0, 255, 0)
-WINDOW_TITLE = "Color Identifier  |  SPACE = identify  |  Q = quit"
+WINDOW_TITLE = "Color Identifier  |  SPACE = identify  |  Y = confirm  |  Q = quit"
 TEXT_COLOR = (255, 255, 255)
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 FONT_SCALE = 0.9
@@ -45,11 +46,41 @@ FONT_THICKNESS = 2
 WARMUP_FRAMES = 10
 
 
+def _highlight_robust_mean(roi: np.ndarray) -> np.ndarray:
+    """
+    Compute the mean BGR of an ROI after masking out specular highlights.
+
+    Specular highlights are identified as pixels that are BOTH very bright
+    (HSV V > 200) AND near-colorless (HSV S < 40). This specifically targets
+    white glare from light sources — not legitimate bright colors like yellow
+    (which has high V but also high S) or white objects (which are uniformly
+    bright across the whole ROI, not just a small glare spot).
+
+    If >80% of pixels are masked (e.g. pointing at a legitimately white object),
+    falls back to the full mean so white/cream colors are still identified correctly.
+    """
+    if roi.size == 0:
+        return np.array([128.0, 128.0, 128.0])
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    # Highlight pixels: very bright (V > 200) AND near-white (S < 40)
+    highlight = (hsv[:, :, 2] > 200) & (hsv[:, :, 1] < 40)
+    non_highlight = ~highlight
+
+    # Only use masked mean if enough real-surface pixels remain (> 20% of ROI)
+    if non_highlight.sum() > roi.shape[0] * roi.shape[1] * 0.20:
+        return roi[non_highlight].astype(np.float64).mean(axis=0)
+    else:
+        # Whole ROI is bright + desaturated → legitimately white/pale object
+        return roi.mean(axis=(0, 1))
+
+
 @dataclass
 class AppState:
     color: str = ""
     identifying: bool = False
     space_press_id: int = 0
+    last_oklab: np.ndarray | None = None  # Oklab of most recent local result
 
 
 class ColorDetector:
@@ -62,8 +93,9 @@ class ColorDetector:
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         self._cap.set(cv2.CAP_PROP_AUTO_WB, 0)
-        self._result_queue: queue.Queue[tuple[str, str, int]] = queue.Queue()
+        self._result_queue: queue.Queue[tuple[str, str, int, np.ndarray | None]] = queue.Queue()
         self._object_detector = ObjectDetector()
+        self._memory = ColorMemory()
 
     def run(self) -> None:
         state = AppState()
@@ -102,6 +134,11 @@ class ColorDetector:
                     state.space_press_id += 1
                     self._start_pipeline(state, api_frame, cx, cy, state.space_press_id)
 
+                elif key in (ord("y"), ord("Y")) and state.color and state.last_oklab is not None:
+                    self._memory.confirm(state.last_oklab, state.color)
+                    _log.info("User confirmed: '%s' (memory samples: %d)",
+                              state.color, self._memory.sample_count())
+
                 elif key in (ord("q"), ord("Q")):
                     break
         finally:
@@ -112,7 +149,7 @@ class ColorDetector:
         """Drain result queue each frame. Thread-safe — queue.Queue is thread-safe by design."""
         while not self._result_queue.empty():
             try:
-                color, source, press_id = self._result_queue.get_nowait()
+                color, source, press_id, oklab = self._result_queue.get_nowait()
             except queue.Empty:
                 break
 
@@ -122,6 +159,7 @@ class ColorDetector:
 
             if source == "local":
                 state.color = color
+                state.last_oklab = oklab
                 state.identifying = False
                 speak(color)
                 _log.info("Local result: %s", color)
@@ -130,8 +168,14 @@ class ColorDetector:
                 # Claude arrived after local — only update if result meaningfully differs
                 if color and color != state.color:
                     _log.info("Claude override: '%s' → '%s'", state.color, color)
+                    # Store Claude's correction in memory
+                    if state.last_oklab is not None:
+                        self._memory.add_correction(state.last_oklab, color)
                     state.color = color
                     speak(color)
+                elif color and color == state.color and state.last_oklab is not None:
+                    # Local and Claude agree — reinforce memory
+                    self._memory.confirm(state.last_oklab, color)
 
     def _start_pipeline(
         self,
@@ -143,9 +187,15 @@ class ColorDetector:
     ) -> None:
         def local_pipeline() -> None:
             try:
-                yolo_class = self._object_detector.detect(frame, cx, cy, VOTE_REGION_SIZE)
+                detection = self._object_detector.detect(frame, cx, cy, VOTE_REGION_SIZE)
+                yolo_class = detection[0] if detection else None
+                yolo_conf = detection[1] if detection else 0.0
+                # Skin routing requires high-confidence person detection (≥0.65)
                 routing = self._object_detector.get_routing(yolo_class)
-                _log.info("YOLO: class=%s routing=%s", yolo_class, routing)
+                if routing == "skin" and yolo_conf < 0.65:
+                    routing = "general"
+                    _log.debug("Person at low conf (%.2f) — routing to general", yolo_conf)
+                _log.info("YOLO: class=%s conf=%.2f routing=%s", yolo_class, yolo_conf, routing)
 
                 # Extract center ROI
                 half = VOTE_REGION_SIZE // 2
@@ -161,16 +211,32 @@ class ColorDetector:
 
                 if routing == "skin":
                     color = skin_detector.get_skin_tone_name(roi)
+                    # No memory lookup for skin tones — ITA is already precise
+                    self._result_queue.put((color, "local", press_id, None))
                 else:
-                    mean_bgr = roi.mean(axis=(0, 1)) if roi.size > 0 else np.array([128., 128., 128.])
+                    mean_bgr = _highlight_robust_mean(roi)
                     b_val, g_val, r_val = int(mean_bgr[0]), int(mean_bgr[1]), int(mean_bgr[2])
+                    try:
+                        oklab = oklab_namer.rgb_to_oklab(r_val, g_val, b_val)
+                    except Exception:
+                        oklab = None
+
+                    # Check memory first — skip full pipeline if we have a trusted sample
+                    if oklab is not None:
+                        memory_color = self._memory.predict(oklab)
+                        if memory_color:
+                            _log.info("Memory hit: '%s'", memory_color)
+                            self._result_queue.put((memory_color, "local", press_id, oklab))
+                            return
+
                     try:
                         color = oklab_namer.get_oklab_color_name(r_val, g_val, b_val)
                     except Exception as e:
                         _log.warning("Oklab failed (%s), using HSV fallback", e)
                         color = get_color_name(r_val, g_val, b_val)
+                        oklab = None
 
-                self._result_queue.put((color, "local", press_id))
+                    self._result_queue.put((color, "local", press_id, oklab))
 
             except Exception as e:
                 _log.error("Local pipeline error: %s", e, exc_info=True)
@@ -178,10 +244,11 @@ class ColorDetector:
 
         def claude_pipeline() -> None:
             try:
-                yolo_class = self._object_detector.detect(frame, cx, cy, VOTE_REGION_SIZE)
+                detection = self._object_detector.detect(frame, cx, cy, VOTE_REGION_SIZE)
+                yolo_class = detection[0] if detection else None
                 color = identify_color(frame, object_context=yolo_class)
                 if color:
-                    self._result_queue.put((color, "claude", press_id))
+                    self._result_queue.put((color, "claude", press_id, None))
             except Exception as e:
                 _log.warning("Claude pipeline error: %s", e)
 

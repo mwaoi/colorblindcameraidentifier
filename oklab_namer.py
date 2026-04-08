@@ -76,6 +76,11 @@ _TREE: cKDTree = cKDTree(_LAB_ARRAY)
 
 # ---------- Public API ----------
 
+def rgb_to_oklab(r: int, g: int, b: int) -> np.ndarray:
+    """Convert uint8 RGB (0–255 each) to Oklab [L, a, b] coordinates."""
+    return _rgb_to_oklab(r / 255.0, g / 255.0, b / 255.0)
+
+
 def get_oklab_color_name(r: int, g: int, b: int) -> str:
     """
     Return the XKCD color name perceptually closest to the given RGB (0–255 each).
