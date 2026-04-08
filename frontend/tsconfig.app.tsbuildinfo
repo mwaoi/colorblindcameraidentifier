@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/main.tsx"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/demo.tsx","./src/main.tsx","./src/data/xkcdcolors.ts","./src/lib/colornames.ts","./src/lib/oklab.ts"],"version":"5.9.3"}

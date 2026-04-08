@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import Demo from './Demo'
 
 // colors that the old HSV pipeline called "forest green"
 // hover to reveal their actual oklab names
@@ -134,6 +135,13 @@ export default function App() {
             </p>
           </div>
         </div>
+      </section>
+
+      <Divider label="try it" />
+
+      {/* ─── live demo ─── */}
+      <section className="px-6 sm:px-12 py-20 max-w-4xl mx-auto">
+        <Demo />
       </section>
 
       <Divider label="how it works" />
