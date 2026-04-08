@@ -51,8 +51,7 @@ export default function App() {
         </h1>
         <div className="max-w-md">
           <p className="text-xl text-zinc-400 leading-relaxed">
-            i'm severely colorblind. every morning i'd reach for what i thought
-            was a blue shirt and it would be purple. so i built something that could tell me.
+            i'm severely colorblind. i made this for fun and to help me out in life.
           </p>
         </div>
       </section>
@@ -121,17 +120,15 @@ export default function App() {
               it identifies the color and says it out loud.
             </p>
             <p className="text-zinc-400 leading-relaxed">
-              clothes, walls, food, skin — whatever's in the reticle.
+              clothes, walls, food, skin, most household objects will work.
               the green box is 160×160 pixels. results come back in about 150ms.
             </p>
             <p className="text-zinc-500 leading-relaxed text-sm">
               a second thread simultaneously asks Claude Vision API.
               if it disagrees with the local result, it overrides and speaks again.
-              that disagreement is stored as a correction — the model learns from it.
+              that disagreement is stored as a correction, which means the model learns from it.
             </p>
-            <p className="text-zinc-600 text-sm">
-              works without internet. claude is optional.
-            </p>
+            
           </div>
         </div>
       </section>

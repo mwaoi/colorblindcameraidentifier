@@ -32,9 +32,14 @@ export default function Demo() {
         video: { width: { ideal: 640 }, height: { ideal: 480 } },
       })
       streamRef.current = stream
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        await videoRef.current.play()
+      const video = videoRef.current
+      if (video) {
+        video.srcObject = stream
+        // Wait for metadata (videoWidth/videoHeight available) before playing
+        await new Promise<void>((resolve) => {
+          video.onloadedmetadata = () => resolve()
+        })
+        await video.play()
       }
       setCameraState('active')
     } catch {
@@ -45,16 +50,15 @@ export default function Demo() {
   const identify = useCallback(() => {
     const video = videoRef.current
     const canvas = canvasRef.current
-    if (!video || !canvas || cameraState !== 'active') return
+    // Guard: video must have loaded dimensions
+    if (!video || !canvas || cameraState !== 'active' || !video.videoWidth) return
 
-    // Draw current frame to hidden canvas (mirrored, matching the CSS scaleX(-1))
-    canvas.width = video.videoWidth || 640
-    canvas.height = video.videoHeight || 480
+    // Draw current frame to hidden canvas — no mirroring needed for color sampling,
+    // CSS scaleX(-1) is display-only and doesn't affect center pixel values
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
     const ctx = canvas.getContext('2d')!
-    ctx.save()
-    ctx.scale(-1, 1)
-    ctx.drawImage(video, -canvas.width, 0)
-    ctx.restore()
+    ctx.drawImage(video, 0, 0)
 
     // Sample the 160×160 center region
     const cx = Math.floor(canvas.width / 2)
@@ -137,12 +141,13 @@ export default function Demo() {
 
   return (
     <div className="flex flex-col gap-5 max-w-xl">
-      {/* Camera feed with reticle */}
-      <div className="relative bg-zinc-900 overflow-hidden border border-zinc-800">
+      {/* Camera feed with reticle — fixed aspect ratio prevents zero-height collapse */}
+      <div className="relative bg-zinc-900 overflow-hidden border border-zinc-800" style={{ aspectRatio: '4/3' }}>
         <video
           ref={videoRef}
-          className="w-full block"
+          className="absolute inset-0 w-full h-full object-cover"
           style={{ transform: 'scaleX(-1)' }}
+          autoPlay
           playsInline
           muted
         />
