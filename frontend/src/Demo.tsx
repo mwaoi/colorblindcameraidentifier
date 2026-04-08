@@ -100,8 +100,8 @@ export default function Demo() {
     return (
       <div className="flex flex-col items-start gap-5">
         <p className="text-zinc-400 text-sm max-w-sm">
-          runs the same Oklab k-NN pipeline as the desktop app — no backend, no API keys.
-          point your camera at anything and press <span className="font-mono text-zinc-300">space</span> or click identify.
+          runs the same Oklab k-NN pipeline as the desktop app — 949 XKCD colors,
+          specular highlight rejection, Web Speech API output. no backend.
         </p>
         <button
           onClick={startCamera}
@@ -109,9 +109,6 @@ export default function Demo() {
         >
           start camera
         </button>
-        <p className="text-zinc-700 text-xs">
-          no data leaves your browser. camera access required.
-        </p>
       </div>
     )
   }
@@ -119,27 +116,20 @@ export default function Demo() {
   if (cameraState === 'requesting') {
     return (
       <div className="text-zinc-600 text-sm font-mono animate-pulse">
-        waiting for camera permission...
+        requesting camera access...
       </div>
     )
   }
 
   if (cameraState === 'denied') {
     return (
-      <div className="space-y-2">
-        <p className="text-zinc-500 text-sm">camera access was denied.</p>
-        <p className="text-zinc-700 text-xs">
-          allow camera access in your browser settings and reload the page.
-        </p>
-      </div>
+      <p className="text-zinc-500 text-sm font-mono">getUserMedia: permission denied</p>
     )
   }
 
   if (cameraState === 'unavailable') {
     return (
-      <p className="text-zinc-500 text-sm">
-        camera API not available — try a modern browser over HTTPS.
-      </p>
+      <p className="text-zinc-500 text-sm font-mono">getUserMedia unavailable</p>
     )
   }
 
@@ -181,7 +171,6 @@ export default function Demo() {
         >
           identify
         </button>
-        <span className="text-zinc-700 text-xs">or press space</span>
       </div>
 
       {/* Result */}

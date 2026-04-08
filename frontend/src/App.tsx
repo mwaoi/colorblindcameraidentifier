@@ -2,7 +2,6 @@ import { useState } from 'react'
 import Demo from './Demo'
 
 // colors that the old HSV pipeline called "forest green"
-// hover to reveal their actual oklab names
 const PROBLEM_SWATCHES = [
   { hex: '#6e750e', correct: 'olive' },
   { hex: '#696112', correct: 'greenish brown' },
@@ -203,7 +202,7 @@ export default function App() {
           <p className="text-zinc-300 leading-relaxed">
             <span className="text-white font-medium">Oklab</span> (Björn Ottosson, 2020) is
             designed so euclidean distance = perceptual difference. these six colors all
-            returned "forest green" before. hover to see what oklab calls them:
+            returned "forest green" before:
           </p>
         </div>
 
@@ -231,7 +230,6 @@ export default function App() {
             </div>
           ))}
         </div>
-        <p className="text-zinc-700 text-xs font-mono mb-10">hover each swatch</p>
 
         {/* conversion pipeline */}
         <div className="bg-[#0d0d0d] border border-zinc-800/60 p-5 font-mono text-xs overflow-x-auto">
@@ -299,14 +297,12 @@ export default function App() {
             </div>
 
             <div className="text-[9px] font-mono text-zinc-700 leading-relaxed min-h-[2.5rem]">
-              {monkHovered !== null ? (
+              {monkHovered !== null && (
                 <>
                   <span className="text-zinc-400">{MONK_TONES[monkHovered].name}</span>
                   <br />
                   {MONK_TONES[monkHovered].ita}
                 </>
-              ) : (
-                <span>hover to see tone name + ITA range</span>
               )}
             </div>
 
@@ -329,8 +325,8 @@ export default function App() {
           <div>
             <p className="text-zinc-400 leading-relaxed mb-5">
               every correction is stored in <span className="font-mono text-zinc-300 text-sm">~/.colorblindcam/memory.json</span> —
-              a k-NN database in Oklab space. claude acts as the automatic teacher.
-              you act as the override.
+              a k-NN database in Oklab space. claude corrections are stored automatically.
+              Y/N key presses act as ground-truth labels.
             </p>
             <p className="text-zinc-400 leading-relaxed mb-8">
               a sample needs to be seen twice before it's trusted. after that, it skips
@@ -377,9 +373,9 @@ export default function App() {
         </div>
 
         <div className="mt-10 border-l-2 border-zinc-800 pl-5 text-sm text-zinc-600 max-w-lg">
-          <p>pressing N stores a rejection with negative count. that oklab region
-          won't match that color again — even across sessions. if it keeps
-          calling the ceiling "medium skin", one press of N teaches it permanently.</p>
+          <p>N stores a rejection entry with count = −(_MIN_COUNT + 1). that Oklab region
+          returns REJECTED from predict() on future queries, bypassing the skin pipeline
+          and forcing re-route to the general Oklab k-NN.</p>
         </div>
       </section>
 
