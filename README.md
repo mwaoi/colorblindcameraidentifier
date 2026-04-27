@@ -4,7 +4,7 @@ I am severely colorblind. I made this color detector in Python to help me naviag
 
 ## What it does
 
-Point your webcam at anything — a shirt, a wall, your hand — press Space, and it speaks the color out loud. The model also learns from corrections over time, so repeated mistakes get fixed permanently.
+Point your webcam at anything to check the color. The model also learns from corrections over time, so repeated mistakes get fixed permanently.
 
 ## Architecture
 
