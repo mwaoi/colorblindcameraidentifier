@@ -35,7 +35,10 @@ export default function Demo() {
       // so this is always non-null
       const video = videoRef.current!
       video.srcObject = stream
-      await new Promise<void>(resolve => { video.onloadedmetadata = () => resolve() })
+      await new Promise<void>(resolve => {
+        if (video.readyState >= 1) resolve()
+        else video.onloadedmetadata = () => resolve()
+      })
       await video.play()
       setCameraState('active')
     } catch {

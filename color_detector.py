@@ -85,7 +85,7 @@ class AppState:
 
 class ColorDetector:
     def __init__(self, camera_index: int = 0):
-        self._cap = cv2.VideoCapture(camera_index)
+        self._cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
         if not self._cap.isOpened():
             raise RuntimeError(
                 f"Could not open webcam at index {camera_index}. Is a camera connected?"
